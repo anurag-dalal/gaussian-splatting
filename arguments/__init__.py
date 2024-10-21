@@ -45,7 +45,7 @@ class ParamGroup:
         return group
 
 class ModelParams(ParamGroup): 
-    def __init__(self, parser, sentinel=False):
+    def __init__(self, parser, sentinel=False, num_requested=-1):
         self.sh_degree = 3
         self._source_path = ""
         self._model_path = ""
@@ -54,6 +54,7 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        self.num_requested = num_requested
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

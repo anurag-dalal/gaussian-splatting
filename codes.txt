@@ -1,0 +1,5 @@
+128.39.201.38
+
+gst-launch-1.0 tcpclientsrc host=127.0.0.1 port=5000  ! fdsink fd=2
+
+ffplay -fflags nobuffer -flags low_delay -probesize 20000 -analyzeduration 1 -strict experimental -framedrop -f mpegts udp://128.39.201.38:5000

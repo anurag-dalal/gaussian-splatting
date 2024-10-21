@@ -68,16 +68,15 @@ def getNerfppNorm(cam_info):
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
-        sys.stdout.write('\r')
-        # the exact output you're looking for:
-        sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
-        sys.stdout.flush()
+        # sys.stdout.write('\r')
+        # # the exact output you're looking for:
+        # sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
+        # sys.stdout.flush()
 
         extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
         height = intr.height
         width = intr.width
-
         uid = intr.id
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
@@ -91,13 +90,18 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
+        elif intr.model=="SIMPLE_RADIAL":
+            focal_length_x = intr.params[0]
+            FovY = focal2fov(focal_length_x, height)
+            FovX = focal2fov(focal_length_x, width)            
         else:
-            assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
+            assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+        
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(image_path)
-
+        # print(image.size[1],FovY, image.size[0],FovX)
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
@@ -129,7 +133,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8):
+def readColmapSceneInfo(path, images, eval, llffhold=8, num_requested=-1):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -168,13 +172,23 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         pcd = fetchPly(ply_path)
     except:
         pcd = None
+    if num_requested==-1:
+        scene_info = SceneInfo(point_cloud=pcd,
+                            train_cameras=train_cam_infos,
+                            test_cameras=test_cam_infos,
+                            nerf_normalization=nerf_normalization,
+                            ply_path=ply_path)
+        return scene_info
+    else:
+        import random
+        random.seed(10)
+        scene_info = SceneInfo(point_cloud=pcd,
+                            train_cameras=random.sample(train_cam_infos, num_requested),
+                            test_cameras=train_cam_infos,
+                            nerf_normalization=nerf_normalization,
+                            ply_path=ply_path)
+        return scene_info
 
-    scene_info = SceneInfo(point_cloud=pcd,
-                           train_cameras=train_cam_infos,
-                           test_cameras=test_cam_infos,
-                           nerf_normalization=nerf_normalization,
-                           ply_path=ply_path)
-    return scene_info
 
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
     cam_infos = []
@@ -212,7 +226,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
             FovY = fovy 
             FovX = fovx
-
+            
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                             image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
             
@@ -254,7 +268,192 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            ply_path=ply_path)
     return scene_info
 
+
+def get_xyz_from_json(filename):
+    # Open and load the JSON file
+    with open(filename, 'r') as file:
+        data = json.load(file)
+    
+    # Extract the x, y, z coordinates from the Centrepoint
+    centrepoint = data.get("Centrepoint", {})
+    x = centrepoint.get("x", None)
+    y = centrepoint.get("y", None)
+    z = centrepoint.get("z", None)
+    
+    return x, y, z
+
+def unreal_to_colmap_me(x,y,z):
+    return [y, -z, x]
+
+def normalize(v):
+    """Normalize a vector."""
+    norm = np.linalg.norm(v)
+    if norm == 0:
+        return v
+    return v / norm
+
+def calculate_camera_parameters(cam_centre, principal_point):
+    # Compute the camera's forward direction (vector pointing from cam_centre to principal_point)
+    forward = principal_point - cam_centre
+    forward = forward / np.linalg.norm(forward)  # Normalize the forward vector
+
+    down = np.array([0, 1, 0])
+    print('initial down', down)
+    # Compute the right direction as the cross product of forward and the down 
+    right = np.cross(down , forward)
+    right = right / np.linalg.norm(right)  # Normalize the right vector
+
+    # Compute the new down direction as the cross product of forward and right vectors
+    down = np.cross(forward, right)
+    print('final down', down)
+    # Construct the rotation matrix: [right, down, forward]
+    rotation_matrix = np.vstack([right, down, forward]).T  # Transpose to fit rotation matrix convention
+
+    tvec = -rotation_matrix.T @ cam_centre
+
+    return rotation_matrix, tvec
+
+import re
+def readUnrealCamerasFromTransforms(meta_data_file, directory, white_background, extension=".jpeg"):
+    cam_infos = []
+    x,y,z = get_xyz_from_json(meta_data_file)
+    principal_axis_point = np.array(unreal_to_colmap_me(x,y,z))
+    extrinsic_files = os.listdir(directory)
+    extrinsic_files = [os.path.join(directory, f) for f in extrinsic_files if '.json' in f]
+    # infos = []
+    pattern = r'img_(\d+)\.json'
+    for idx, param_file in enumerate(extrinsic_files, start=0):
+        with open(param_file) as json_file:
+            json_number = re.search(pattern, param_file).group(1)
+            cam_name = directory + '/img_{}{}'.format(json_number, extension)
+            image_name = Path(cam_name).stem
+            image = Image.open(cam_name)
+
+            im_data = np.array(image.convert("RGBA"))
+
+            bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+            norm_data = im_data / 255.0
+            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+
+            cam = json.load(json_file)
+            tvec = np.array(unreal_to_colmap_me(cam["Transform"]["x"], cam["Transform"]["y"], cam["Transform"]["z"]))
+            R, tvec = calculate_camera_parameters(principal_axis_point, tvec)
+            
+
+            # tvec = np.array([tvec[0], tvec[1], tvec[2]])
+            # infos.append(R.ravel().tolist() + tvec.tolist())
+            focal_length_x = cam["Intrinsic"]["fx"]
+            focal_length_y = cam["Intrinsic"]["fy"]
+            focal_length_x = 672.199236681
+            focal_length_y = 672.199236681
+            FovY = focal2fov(focal_length_y, image.size[1])
+            FovX = focal2fov(focal_length_x, image.size[0])
+            # FovY = 1.351322864871
+            # FovX = 1.91772702
+            # print(image.size[1],FovY, image.size[0],FovX)
+            # print(arr.shape)
+            cam_infos.append(CameraInfo(uid=int(json_number), R=R, T=tvec, FovY=FovY, FovX=FovX, image=Image.open(cam_name), image_path=cam_name, image_name=image_name, width=image.size[0], height=image.size[1]))
+    # infos = np.array(infos)
+    # n = np.random.randint(300)
+    # np.savetxt("output_unreal_{}.csv".format(n), infos, delimiter=",", fmt='%f')   
+    # print('-----------------------------------------------------------------', "output_unreal_{}.csv".format(n), '\n')     
+    return cam_infos
+def readUnrealCamerasFromTransformsOld(meta_data_file, directory, white_background, extension=".jpeg"):
+    cam_infos = []
+    x,y,z = get_xyz_from_json(meta_data_file)
+    principal_axis_point = unreal_to_colmap_me(x,y,z)
+    extrinsic_files = os.listdir(directory)
+    extrinsic_files = [os.path.join(directory, f) for f in extrinsic_files if '.json' in f]
+
+    for idx, param_file in enumerate(extrinsic_files, start=0):
+        with open(param_file) as json_file:
+            cam_name = directory + '/img_{}{}'.format(idx, extension)
+            image_name = Path(cam_name).stem
+            image = Image.open(cam_name)
+
+            im_data = np.array(image.convert("RGBA"))
+
+            bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+            norm_data = im_data / 255.0
+            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+
+            cam = json.load(json_file)
+            tvec = np.array([cam["Transform"]["x"], cam["Transform"]["y"], cam["Transform"]["z"]])
+
+            # Extract and convert the rotation matrix to a quaternion (why not use the DCM directly?)
+            R = np.array([
+                [cam["Transform"]["r11"], cam["Transform"]["r12"], cam["Transform"]["r13"]],
+                [cam["Transform"]["r21"], cam["Transform"]["r22"], cam["Transform"]["r23"]],
+                [cam["Transform"]["r31"], cam["Transform"]["r32"], cam["Transform"]["r33"]]
+            ])
+
+            focal_length_x = cam["Intrinsic"]["fx"]
+            focal_length_y = cam["Intrinsic"]["fy"]
+            FovY = focal2fov(focal_length_y, image.size[1])
+            FovX = focal2fov(focal_length_x, image.size[0])
+            # print(image.size[1],FovY, image.size[0],FovX)
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=tvec, FovY=FovY, FovX=FovX, image=image,
+                            image_path=cam_name, image_name=image_name, width=image.size[0], height=image.size[1]))
+            
+    return cam_infos
+def readUnrealSyntheticInfo(path, white_background, eval, extension=".jpeg"):
+    print("Reading Training Transforms")
+    train_cam_infos = readUnrealCamerasFromTransforms(os.path.join(path, 'metadata.json'), os.path.join(path, 'train_uniform'), white_background, extension)
+    print("Reading Test Transforms")
+    test_cam_infos = readUnrealCamerasFromTransforms(os.path.join(path, 'metadata.json'), os.path.join(path, 'test'), white_background, extension)
+    # Parse the JSON data
+    print(os.path.join(path, 'metadata.json'))
+    unreal_cams = json.load(open(os.path.join(path, 'metadata.json')))
+
+    # Extract radius
+    radius = unreal_cams['Radius']
+
+    # Extract centrepoint
+    centrepoint = unreal_cams['Centrepoint']
+    x = centrepoint['x']
+    y = centrepoint['y']
+    z = centrepoint['z']
+    x,y,z = unreal_to_colmap_me(x,y,z)
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    print(nerf_normalization)
+    nerf_normalization['radius'] = unreal_cams['Radius']
+    nerf_normalization['translate'] = np.array([-x,-y,-z])
+    print(nerf_normalization)
+    
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Unreal scenes
+        xyz = np.random.random((num_pts, 3)) * (2 * radius) - radius
+        xyz[:, 0] += x
+        xyz[:, 1] += y
+        xyz[:, 2] += z
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "Unreal" : readUnrealSyntheticInfo,
 }

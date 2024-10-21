@@ -19,7 +19,7 @@ CameraModel = collections.namedtuple(
 Camera = collections.namedtuple(
     "Camera", ["id", "model", "width", "height", "params"])
 BaseImage = collections.namedtuple(
-    "Image", ["id", "qvec", "tvec", "camera_id", "name", "xys", "point3D_ids"])
+    "Image", ["id", "qvec", "tvec", "camera_id", "name", "xys", "point3D_ids", "R"])
 Point3D = collections.namedtuple(
     "Point3D", ["id", "xyz", "rgb", "error", "image_ids", "point2D_idxs"])
 CAMERA_MODELS = {
@@ -76,7 +76,7 @@ class Image(BaseImage):
 
 def sorted_image_files(directory):
     # Regex pattern to match image files and extract camera numbers
-    pattern = re.compile(r'.*Miqus_(\d+)_.*\.png$')
+    pattern = re.compile(r'.*img_(\d+).*\.jpeg$')
 
     # List all files in the directory
     files = os.listdir(directory)
@@ -144,16 +144,113 @@ def read_intrinsics_json(path, camera_model_type="OPENCV"):
             cameras[idx] = Camera(id=idx, model=model_id, width=width, height=height, params=params)
     return cameras
 
+def calculate_transformation_matrix(x1, y1, z1, x2, y2, z2):
+    # Translation Component
+    translation_matrix = np.array([[1, 0, 0, x2],
+                                   [0, 1, 0, y2],
+                                   [0, 0, 1, z2],
+                                   [0, 0, 0, 1]])
 
-def read_extrinsics_json(path):
+    # Rotation Component
+    u = np.array([x1 - x2, y1 - y2, z1 - z2])
+    norm_u = np.linalg.norm(u)
+    theta = np.arccos(np.dot(u, [0, 0, 1]) / norm_u)  # angle between u and z-axis
+
+    if norm_u != 0:
+        k = u / norm_u
+        k_cross = np.array([[0, -k[2], k[1]],
+                            [k[2], 0, -k[0]],
+                            [-k[1], k[0], 0]])
+        k_cross_square = np.dot(k_cross, k_cross)
+        rotation_matrix = np.eye(3) + k_cross + (k_cross_square * (1 - np.cos(theta))) / np.dot(theta, theta)
+    else:
+        rotation_matrix = np.eye(3)
+
+    # Combining Translation and Rotation Components
+    # transformation_matrix = np.dot(translation_matrix, np.concatenate((rotation_matrix, np.zeros((3, 1))), axis=1))
+    # transformation_matrix[3, 3] = 1
+
+    return rotation_matrix
+
+def get_rotation_matrix(x1, y1, z1, x2, y2, z2):
+    P = np.array([x2, y2, z2])
+    C = np.array([x1, y1, z1])
+    # Ensure the vectors are normalized
+    P = P / np.linalg.norm(P)
+    C = C / np.linalg.norm(C)
+
+    # Get the angle between the vectors
+    dot_product = np.dot(P, C)
+    angle = np.arccos(dot_product)
+
+    # Get the axis of rotation using the cross product
+    axis = np.cross(P, C)
+
+    # Construct the rotation matrix using the axis and angle
+    sin_theta = np.sin(angle)
+    cos_theta = np.cos(angle)
+    one_minus_cos_theta = 1 - cos_theta
+    axis_x = axis[0]
+    axis_y = axis[1]
+    axis_z = axis[2]
+
+    rotation_matrix = np.array([
+        [cos_theta + axis_x ** 2 * one_minus_cos_theta, axis_x * axis_y * one_minus_cos_theta - axis_z * sin_theta, axis_x * axis_z * one_minus_cos_theta + axis_y * sin_theta],
+        [axis_x * axis_y * one_minus_cos_theta + axis_z * sin_theta, cos_theta + axis_y ** 2 * one_minus_cos_theta, axis_y * axis_z * one_minus_cos_theta - axis_x * sin_theta],
+        [axis_x * axis_z * one_minus_cos_theta - axis_y * sin_theta, axis_y * axis_z * one_minus_cos_theta + axis_x * sin_theta, cos_theta + axis_z ** 2 * one_minus_cos_theta]
+    ])
+
+    return rotation_matrix
+def get_rotation_matrix2(x1, y1, z1, x2, y2, z2):
+    L = np.array([x2, y2, z2])
+    V = np.array([x1, y1, z1])
+    V = L-V
+
+    # Calculate the forward and up vectors for the object
+    forward = V - L
+    up = np.array([0, 0, 1]) # Assuming initial up vector is positive z-axis
+
+    # Ensure forward and up vectors are orthogonal
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    up = np.cross(right, forward)
+
+    # Construct the rotation matrix using the forward, up, and right vectors
+    rotation_matrix = np.array([
+        [right[0], up[0], forward[0]],
+        [right[1], up[1], forward[1]],
+        [right[2], up[2], forward[2]]
+    ])
+
+    return rotation_matrix
+
+
+def get_camera_extrinsic(x1, y1, z1, x2, y2, z2):
+    P = np.array([x2, y2, z2])
+    C = np.array([x1, y1, z1])
+    # Calculate the forward and up vectors for the camera
+    forward = C - P
+    up = np.array([0, 1, 0]) # Assuming initial up vector is positive y-axis
+
+    # Ensure forward and up vectors are orthogonal
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    up = np.cross(right, forward)
+
+    # Construct the rotation matrix using the forward, up, and right vectors
+    rotation_matrix = np.array([right,up,-forward])
+    return rotation_matrix
+
+def read_extrinsics_json(paths):
     """
     Written by K. M. Knausgård 2024-01
     """
 
     images = {}
-    with open(path, 'r') as file:
-        data = json.load(file)
-        for idx, cam in enumerate(data["Cameras"], start=1):
+    for idx, path in enumerate(paths, start=1):
+        with open(path, 'r') as file:
+            cam = json.load(file)
+            # for idx, cam in enumerate(data["Cameras"], start=1):
             # Extract the translation vector
             tvec = np.array([cam["Transform"]["x"], cam["Transform"]["y"], cam["Transform"]["z"]])
 
@@ -175,7 +272,8 @@ def read_extrinsics_json(path):
             images[image_id] = Image(
                 id=image_id, qvec=qvec, tvec=tvec,
                 camera_id=camera_id, name=image_name,
-                xys=xys, point3D_ids=point3D_ids
+                xys=xys, point3D_ids=point3D_ids,
+                R=R
             )
     return images
 
@@ -202,7 +300,7 @@ def test_qualisys_json_loader():
         print(f"Image ID: {image_id}, QVec: {image.qvec}, TVec: {image.tvec}")
 
 
-def visualize_cameras(images, arrow_length_mm=500):
+def visualize_cameras(images, arrow_length_mm=1000):
     plt.figure()
 
     # Define a unit vector in the direction the camera is facing (along negative Z-axis)
@@ -260,7 +358,7 @@ def set_axes_equal(ax):
     ax.set_zlim([0, z_range + padding])
 
 
-def visualize_cameras_3d(images, arrow_length_mm=750):
+def visualize_cameras_3d(images, arrow_length_mm=1000):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
@@ -275,7 +373,7 @@ def visualize_cameras_3d(images, arrow_length_mm=750):
     ax.quiver(0, 0, 0, axis_length, 0, 0, color='red')
     ax.quiver(0, 0, 0, 0, axis_length, 0, color='green')
     ax.quiver(0, 0, 0, 0, 0, axis_length, color='blue')
-
+    ax.scatter(100, -100, 0, c='g', marker='o')
     # Draw each camera
     for image_id, image in images.items():
         # Camera position
@@ -285,6 +383,7 @@ def visualize_cameras_3d(images, arrow_length_mm=750):
         ax.scatter(camera_pos[0], camera_pos[1], camera_pos[2], c='r', marker='o')
 
         # Calculate the camera orientation using DCM
+        # camera_orientation = image.R.T @ np.array([0, 0, -1])
         camera_orientation = image.qvec2rotmat().T @ np.array([0, 0, -1])
 
         # Calculate the end point of the orientation line (500 mm along the orientation vector)
@@ -296,7 +395,7 @@ def visualize_cameras_3d(images, arrow_length_mm=750):
                 [camera_pos[2], line_end[2]], 'b-')
 
 
-    ax.set_zlim(-500, ax.get_zlim()[1])
+    ax.set_zlim(0, ax.get_zlim()[1])
 
     # Set labels
     ax.set_xlabel('X axis (mm)')
@@ -304,7 +403,7 @@ def visualize_cameras_3d(images, arrow_length_mm=750):
     ax.set_zlabel('Z axis (mm)')
     ax.set_aspect('equal')  # https://matplotlib.org/3.6.0/users/prev_whats_new/whats_new_3.6.0.html#equal-aspect-ratio-for-3d-plots
     ax.set_title('Camera Extrinsics Visualization (3D)')
-
+    plt.savefig('camera_pos.png', dpi=300)
     plt.show()
 
 
@@ -337,33 +436,39 @@ def create_floor(ax, images, grid_size):
 
 if __name__ == "__main__":
     # Run tests
-    test_qualisys_json_loader()
+    # test_qualisys_json_loader()
 
 
     # Visualize cameras for test case
 
     # Load extrinsic data
-    directory = '/home/anurag/codes/gaussian_splatting_kristian_fork/gaussian-splatting/scene/qualisys_json_loader_test_data'
-    extrinsic_file = os.path.join(directory, 'Test_Recording_Qualisys_MoCap_Miqus_Hybrid_Motionlab_UniversityOfAgder_Norway_0001.json')
-    extrinsics = read_extrinsics_json(extrinsic_file)
+    directory = '/mnt/c/MyFiles/Datasets/UnrealData/Scene_01/R_500.0/C_64/train_uniform'
+    directory = '/mnt/c/MyFiles/Datasets/unreal_data_colmap/data/train_uniform'
+    extrinsic_files = os.listdir(directory)
+    extrinsic_files = [os.path.join(directory, f) for f in extrinsic_files if '.json' in f]
+    # print(extrinsic_files)
+    # extrinsic_file = os.path.join(directory, 'Test_Recording_Qualisys_MoCap_Miqus_Hybrid_Motionlab_UniversityOfAgder_Norway_0001.json')
+    extrinsics = read_extrinsics_json(extrinsic_files)
+    meta_data_file='/mnt/c/MyFiles/Datasets/UnrealData/Scene_01/R_500.0/C_32/metadata.json'
+    meta_data_file = '/mnt/c/MyFiles/Datasets/unreal_data_colmap/data/metadata.json'
+    metadata=json.load(open(meta_data_file))
 
-    # Sort image files
+    # # Sort image files
     sorted_files = sorted_image_files(directory)
-
-    # Create a new dictionary for images sorted by their file names
+    # # Create a new dictionary for images sorted by their file names
     sorted_images = {}
     for file in sorted_files:
         # Extract camera number from file name
-        camera_number = int(re.search(r'Miqus_(\d+)_', file).group(1))
+        camera_number = int(re.search(r'img_(\d+)', file).group(1))
         if camera_number in extrinsics:
             sorted_images[camera_number] = extrinsics[camera_number]
 
     # Visualize cameras with sorted extrinsic parameters
-    visualize_cameras(sorted_images)
+    # visualize_cameras(sorted_images)
 
-    # Enable interactive mode for 3D visualization
-    plt.ion()
-    visualize_cameras_3d(sorted_images)
+    # # Enable interactive mode for 3D visualization
+    # plt.ion()
+    visualize_cameras_3d(sorted_images, metadata["Radius"]//20)
 
-    # Keep the plot open
+    # # Keep the plot open
     plt.show(block=True)

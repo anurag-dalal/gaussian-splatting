@@ -184,6 +184,7 @@ def read_extrinsics_binary(path_to_model_file):
         void Reconstruction::WriteImagesBinary(const std::string& path)
     """
     images = {}
+    #infos = []
     with open(path_to_model_file, "rb") as fid:
         num_reg_images = read_next_bytes(fid, 8, "Q")[0]
         for _ in range(num_reg_images):
@@ -192,6 +193,8 @@ def read_extrinsics_binary(path_to_model_file):
             image_id = binary_image_properties[0]
             qvec = np.array(binary_image_properties[1:5])
             tvec = np.array(binary_image_properties[5:8])
+            R = qvec2rotmat(qvec)
+            #infos.append(R.ravel().tolist() + tvec.tolist())
             camera_id = binary_image_properties[8]
             image_name = ""
             current_char = read_next_bytes(fid, 1, "c")[0]
@@ -209,6 +212,9 @@ def read_extrinsics_binary(path_to_model_file):
                 id=image_id, qvec=qvec, tvec=tvec,
                 camera_id=camera_id, name=image_name,
                 xys=xys, point3D_ids=point3D_ids)
+    # infos = np.array(infos)
+    # n = np.random.randint(300)
+    # np.savetxt("output_colmap.csv", infos, delimiter=",", fmt='%f')  
     return images
 
 
