@@ -80,3 +80,14 @@ def camera_to_JSON(id, camera : Camera):
         'fx' : fov2focal(camera.FovX, camera.width)
     }
     return camera_entry
+
+def cam_to_json(R, T):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = R.T
+    Rt[:3, 3] = T
+    Rt[3, 3] = 1.0
+
+    W2C = np.linalg.inv(Rt)
+    pos = W2C[:3, 3]
+    rot = W2C[:3, :3]
+    return rot, pos

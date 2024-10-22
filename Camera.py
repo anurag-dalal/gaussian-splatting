@@ -123,6 +123,7 @@ class Camera():
         
         `Type`: list[float]
         """
+        self.tt: Optional[ndarray] = None
 
 
 

@@ -281,9 +281,24 @@ def get_xyz_from_json(filename):
     z = centrepoint.get("z", None)
     
     return x, y, z
+def JSON_to_camera(rot, pos):
+    # Initialize the world-to-camera transformation matrix W2C
+    W2C = np.zeros((4, 4))
+    W2C[:3, :3] = rot
+    W2C[:3, 3] = pos
+    W2C[3, 3] = 1.0
+
+    # Compute the camera-to-world transformation matrix Rt by inverting W2C
+    Rt = np.linalg.inv(W2C)
+
+    # Extract the rotation matrix R and translation vector T from Rt
+    R = Rt[:3, :3].T
+    T = Rt[:3, 3]
+
+    return R, T
 
 def unreal_to_colmap_me(x,y,z):
-    return [y, -z, x]
+    return [y, -z, x] # FOR COLMAP
 
 def normalize(v):
     """Normalize a vector."""
@@ -294,21 +309,19 @@ def normalize(v):
 
 def calculate_camera_parameters(cam_centre, principal_point):
     # Compute the camera's forward direction (vector pointing from cam_centre to principal_point)
-    forward = principal_point - cam_centre
+    forward = -(principal_point - cam_centre)
     forward = forward / np.linalg.norm(forward)  # Normalize the forward vector
 
-    down = np.array([0, 1, 0])
-    print('initial down', down)
-    # Compute the right direction as the cross product of forward and the down 
-    right = np.cross(down , forward)
+    buttom = np.array([0, 1, 0])
+    # Compute the right direction as the cross product of forward and the up_vector
+    right = np.cross(buttom, forward)
     right = right / np.linalg.norm(right)  # Normalize the right vector
 
-    # Compute the new down direction as the cross product of forward and right vectors
-    down = np.cross(forward, right)
-    print('final down', down)
-    # Construct the rotation matrix: [right, down, forward]
-    rotation_matrix = np.vstack([right, down, forward]).T  # Transpose to fit rotation matrix convention
+    # Compute the new up direction as the cross product of forward and right vectors
+    buttom = np.cross(forward, right)
 
+    # Construct the rotation matrix: [right, up, forward]
+    rotation_matrix = np.vstack([right, buttom, forward]).T  # Transpose to fit rotation matrix convention
     tvec = -rotation_matrix.T @ cam_centre
 
     return rotation_matrix, tvec
@@ -339,8 +352,8 @@ def readUnrealCamerasFromTransforms(meta_data_file, directory, white_background,
 
             cam = json.load(json_file)
             tvec = np.array(unreal_to_colmap_me(cam["Transform"]["x"], cam["Transform"]["y"], cam["Transform"]["z"]))
-            R, tvec = calculate_camera_parameters(principal_axis_point, tvec)
-            
+            R, _ = calculate_camera_parameters(principal_axis_point, tvec)
+            R, tvec = JSON_to_camera(R, tvec)
 
             # tvec = np.array([tvec[0], tvec[1], tvec[2]])
             # infos.append(R.ravel().tolist() + tvec.tolist())
@@ -420,7 +433,7 @@ def readUnrealSyntheticInfo(path, white_background, eval, extension=".jpeg"):
     x,y,z = unreal_to_colmap_me(x,y,z)
     nerf_normalization = getNerfppNorm(train_cam_infos)
     print(nerf_normalization)
-    nerf_normalization['radius'] = unreal_cams['Radius']
+    nerf_normalization['radius'] = unreal_cams['Radius'] * 2 * 1.2
     nerf_normalization['translate'] = np.array([-x,-y,-z])
     print(nerf_normalization)
     
